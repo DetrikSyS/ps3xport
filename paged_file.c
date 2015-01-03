@@ -246,7 +246,7 @@ paged_file_write (PagedFile *f, void *buffer, u32 len)
   return pos;
 }
 
-int
+u64
 paged_file_seek (PagedFile *f, u64 offset)
 {
   u32 pos;
@@ -268,7 +268,7 @@ paged_file_seek (PagedFile *f, u64 offset)
         f->crypt == PAGED_FILE_CRYPT_AES_256_CBC) {
       if (offset >= 0x10) {
         fseek (f->fd, offset - 0x10, SEEK_SET);
-        if (fread (f->iv, 1, 0x10, f->fd) != 1)
+        if (fread (f->iv, 1, 0x10, f->fd) != 0x10)
           return -1;
       }
     } else if (f->crypt == PAGED_FILE_CRYPT_AES_128_CTR) {
@@ -295,17 +295,17 @@ paged_file_seek (PagedFile *f, u64 offset)
   return f->page_pos;
 }
 
-int
-paged_file_splice (PagedFile *f, PagedFile *from, int len)
+u64
+paged_file_splice (PagedFile *f, PagedFile *from, u64 len)
 {
   char buffer[1024];
-  int total = 0;
+  u64 total = 0;
   int size;
   int read;
 
-  while (len == -1 || total < len) {
+  while (len == (u64)-1 || total < len) {
     size = len - total;
-    if (len == -1 || (u32) size > sizeof(buffer))
+    if (len == (u64)-1 || (u32) size > sizeof(buffer))
       size = sizeof(buffer);
 
     read = paged_file_read (from, buffer, size);
