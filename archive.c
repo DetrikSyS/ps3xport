@@ -941,6 +941,7 @@ archive_add (const char *path, const char *game, int protected)
   ChainedList *files = NULL;
   PagedFile in = {0};
   PagedFile out = {0};
+  PagedFile out1 = {0};
   u32 index = 0;
   FILE *fd = NULL;
   DIR *dir_fd = NULL;
@@ -949,6 +950,7 @@ archive_add (const char *path, const char *game, int protected)
   u8 key[0x10];
   u8 iv[0x10];
   u8 hmac[0x40];
+  FILE *fp = NULL;
 
   if (protected)
     archive_index.prefix = "archive2";
@@ -993,59 +995,55 @@ archive_add (const char *path, const char *game, int protected)
       continue;
     }
     archive_index.dirs = chained_list_append (archive_index.dirs, dir);
+  
   }
   chained_list_free (dirs);
-
   while (1) {
     snprintf (buffer, sizeof(buffer), "%s/%s_%02d.dat", path, archive_index.prefix, index);
     if (!file_exists (buffer)) {
-      if (index == 0)
-        break;
-      if (!new_file)
-        index--;
+      if(index==0)
+	break;
+      index--;
       break;
     }
     index++;
   }
 
   snprintf (buffer, sizeof(buffer), "%s/%s_%02d.dat", path, archive_index.prefix, index);
+  int firstindex=index;
   if (file_exists (buffer)) {
+
     if (!archive_open (buffer, &in, &dat_header))
       die ("Couldn't open archive %d\n", index);
-
     if (paged_file_read (&in, &archive_header, sizeof(archive_header)) != sizeof(archive_header))
       die ("Couldn't read header\n");
     ARCHIVE_HEADER_FROM_BE (archive_header);
-
     if (archive_header.id != archive_index.header.id)
       die ("Wrong archive ID\n");
     if (archive_header.index != index)
       die ("Wrong archive index\n");
     snprintf (buffer, sizeof(buffer), "%s/%s_%02d.tmp", path, archive_index.prefix, index);
-
+    archive_header.archive_type = ARCHIVE_TYPE_NORMAL_CONTENT; //MUST BE NORMAL FOR ALL ARCHIVES 0x05
     if (!paged_file_open (&out, buffer, FALSE))
       die ("Couldn't open output archive %d\n", index);
-
     ARCHIVE_DAT_FILE_HEADER_TO_BE (dat_header);
     if (paged_file_write (&out, &dat_header, sizeof(dat_header)) != sizeof(dat_header))
       die ("Couldn't write file dat header\n");
     ARCHIVE_DAT_FILE_HEADER_FROM_BE (dat_header);
-
     total_file_size += sizeof(dat_header);
-
     if (!archive_gen_keys (&dat_header, key, iv, hmac))
       die ("Error generating keys\n");
-
     paged_file_flush (&out);
     paged_file_hash (&out, hmac);
     paged_file_crypt (&out, key, iv, PAGED_FILE_CRYPT_AES_128_CBC, NULL, NULL);
-
+    ARCHIVE_HEADER_TO_BE (archive_header); //HAD TO ADD THIS BECAUSE IT WOULDN'T SET A GOOD ARCHIVE INDEX.
     if (paged_file_write (&out, &archive_header, sizeof(archive_header)) != sizeof(archive_header))
       die ("Couldn't write encrypted header\n");
+    ARCHIVE_HEADER_FROM_BE (archive_header);//HAD TO ADD THIS BECAUSE IT WOULDN'T SET A GOOD ARCHIVE INDEX.
     total_file_size += sizeof(archive_header);
-    total_file_size += paged_file_splice (&out, &in, -1);
-    if (total_file_size > 0xFFFFFE00)
-      die ("Output file is too big\n");
+    total_file_size += paged_file_splice (&out, &in,-1);
+    //if (total_file_size > 0xFFFFFE00 //Not needed? Guess i'm removing this...
+    //    die ("Output file is too big\n");
     paged_file_close (&in);
     new_file = FALSE;
   } else {
@@ -1061,19 +1059,15 @@ archive_add (const char *path, const char *game, int protected)
 
     archive_header = archive_index.header;
     archive_header.index = index;
-    archive_header.archive_type = ARCHIVE_TYPE_NORMAL_CONTENT;
+    archive_header.archive_type = ARCHIVE_TYPE_NORMAL_CONTENT; //MUST BE NORMAL FOR ALL ARCHIVES 0x05
     archive_header.file_type = FILE_TYPE_DATA;
-
     snprintf (buffer, sizeof(buffer), "%s/%s_%02d.dat", path, archive_index.prefix, index);
-
     if (!paged_file_open (&out, buffer, FALSE))
       die ("Couldn't open output archive %d\n", index);
-
     ARCHIVE_DAT_FILE_HEADER_TO_BE (dat_header);
     if (paged_file_write (&out, &dat_header, sizeof(dat_header)) != sizeof(dat_header))
       die ("Couldn't write file dat header\n");
     ARCHIVE_DAT_FILE_HEADER_FROM_BE (dat_header);
-
     total_file_size += sizeof(dat_header);
 
     if (!archive_gen_keys (&dat_header, key, iv, hmac))
@@ -1082,16 +1076,16 @@ archive_add (const char *path, const char *game, int protected)
     paged_file_flush (&out);
     paged_file_hash (&out, hmac);
     paged_file_crypt (&out, key, iv, PAGED_FILE_CRYPT_AES_128_CBC, NULL, NULL);
-
     ARCHIVE_HEADER_TO_BE (archive_header);
     if (paged_file_write (&out, &archive_header, sizeof(archive_header)) != sizeof(archive_header))
       die ("Couldn't write encrypted header\n");
     ARCHIVE_HEADER_TO_BE (archive_header);
-
     total_file_size += sizeof(archive_header);
     new_file = TRUE;
   }
-
+  int locked=0;
+  //u32 filelimit = 0x10000000; //PRUEBA
+  u32 filelimit = 0xEFFFFFFF;
   for (list = files; list; list = list->next) {
     ArchiveFile *file = list->data;
 
@@ -1100,26 +1094,86 @@ archive_add (const char *path, const char *game, int protected)
       free (file);
       continue;
     }
-
     snprintf (buffer, 0x500, "%s/%s", game, file->path);
     fd = fopen (buffer, "rb");
     if (!fd)
       die ("Couldn't open input file : %s\n", buffer);
-
     while (1) {
       int read = fread (buffer, 1, sizeof(buffer), fd);
-      if (read == 0)
-        break;
-      /* TODO : Must be able to exceed a file size of 0xFFFFFE00 by splitting */
-      if (total_file_size + read > 0xFFFFFE00)
-        die ("Output file is too big\n");
-      paged_file_write (&out, buffer, read);
-      total_file_size += read;
-    }
+      if (read == 0){
+	break;
+      }
+      if(!locked){
+	paged_file_write (&out, buffer, read);
+	total_file_size += read;
+      }else{
+	paged_file_write (&out1, buffer, read);
+	total_file_size += read;
+      }
+      if(total_file_size +read > filelimit){
+	if (locked){
+	  paged_file_flush(&out1);
+	  fp=out1.fd;
+	  out1.fd=NULL;
+	  paged_file_close(&out1);
+	  fseek (fp, 8, SEEK_SET);
+	  fwrite(out1.digest,0x14,1,fp);
+	  fclose(fp);
+	}
+	locked=1;
+	++index;
+	printf("File Limit reached! Creating File %s_%02d.dat\n", archive_index.prefix, index);
+	total_file_size=0;
+	snprintf (buffer, sizeof(buffer), "%s/%s_%02d.dat", path, archive_index.prefix, index);
+	if (protected) {
+	  dat_header.encryption_type =  ENCRYPTION_TYPE_IDP;
+	  memset (dat_header.key_seed, 0, 0x14);
+	} else {
+	  dat_header.encryption_type = ENCRYPTION_TYPE_KEYSEED;
+	  generate_random_key_seed (dat_header.key_seed);
+	}
+	dat_header.dat_type = DAT_TYPE_WITH_PROTECTED_ARCHIVE;
+	memset (dat_header.padding, 0, 0x10);
 
-    fclose (fd);
+	archive_header = archive_index.header;
+	archive_header.id = archive_index.header.id;
+	archive_header.index = index;
+	archive_header.archive_type = ARCHIVE_TYPE_NORMAL_CONTENT; //MUST BE NORMAL FOR ALL ARCHIVES 0x05
+	archive_header.file_type = FILE_TYPE_DATA;
+	if (!paged_file_open (&out1, buffer, FALSE))
+	  die ("Couldn't open output archive %d\n", index);
+	ARCHIVE_DAT_FILE_HEADER_TO_BE (dat_header);
+	if (paged_file_write (&out1, &dat_header, sizeof(dat_header)) != sizeof(dat_header))
+	  die ("Couldn't write file dat header\n");
+	ARCHIVE_DAT_FILE_HEADER_FROM_BE (dat_header);
+	total_file_size += sizeof(dat_header);
+	if (!archive_gen_keys (&dat_header, key, iv, hmac))
+	  die ("Error generating keys\n");
+	paged_file_flush (&out1);
+	paged_file_hash (&out1, hmac);
+	paged_file_crypt (&out1, key, iv, PAGED_FILE_CRYPT_AES_128_CBC, NULL, NULL);
+	ARCHIVE_HEADER_TO_BE (archive_header);
+	if (paged_file_write (&out1, &archive_header, sizeof(archive_header)) != sizeof(archive_header))
+	  die ("Couldn't write encrypted header\n");
+	ARCHIVE_HEADER_TO_BE (archive_header);
+	total_file_size += sizeof(archive_header);
+      }
+
+    }
     archive_index.files = chained_list_append (archive_index.files, file);
+    fclose (fd);
   }
+  if (locked){
+    paged_file_flush(&out1);
+    fp=out1.fd;
+    out1.fd=NULL;
+    paged_file_close(&out1);
+    fseek (fp, 8, SEEK_SET);
+    fwrite(out1.digest,0x14,1,fp);
+    fclose(fp);
+  }
+  index=firstindex;
+
   paged_file_flush (&out);
   fd = out.fd;
   out.fd = NULL;
